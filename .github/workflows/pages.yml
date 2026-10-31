@@ -1,0 +1,102 @@
+name: Enable GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    outputs:
+      branch_source: ${{ steps.branch.outputs.branch_source }}
+    steps:
+      - name: Deploy from branch main /
+        id: branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          body='{"build_type":"legacy","source":{"branch":"main","path":"/"}}'
+          request() {
+            local method="$1"
+            local url="$2"
+            local outfile="$3"
+            local data="${4:-}"
+            if [ -n "$data" ]; then
+              curl -sS -o "$outfile" -w "%{http_code}" -X "$method" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -H "Content-Type: application/json" \
+                "$url" -d "$data"
+            else
+              curl -sS -o "$outfile" -w "%{http_code}" -X "$method" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "$url"
+            fi
+          }
+
+          branch_source=false
+          code="$(request POST "https://api.github.com/repos/${repo}/pages" /tmp/pages-create.json "$body" || true)"
+          echo "create_http=${code}"
+          cat /tmp/pages-create.json || true
+          echo
+
+          if [ "$code" = "409" ]; then
+            code="$(request PUT "https://api.github.com/repos/${repo}/pages" /tmp/pages-update.json "$body" || true)"
+            echo "update_http=${code}"
+            cat /tmp/pages-update.json || true
+            echo
+          fi
+
+          if [ "$code" = "201" ] || [ "$code" = "200" ]; then
+            code="$(request GET "https://api.github.com/repos/${repo}/pages" /tmp/pages-get.json || true)"
+            echo "get_http=${code}"
+            cat /tmp/pages-get.json || true
+            echo
+            if python3 -c 'import json; d=json.load(open("/tmp/pages-get.json")); s=d.get("source") or {}; raise SystemExit(0 if d.get("build_type")=="legacy" and s.get("branch")=="main" and s.get("path") in ("/","") else 1)'; then
+              branch_source=true
+              code="$(request POST "https://api.github.com/repos/${repo}/pages/builds" /tmp/pages-build.json || true)"
+              echo "build_http=${code}"
+              cat /tmp/pages-build.json || true
+              echo
+            fi
+          else
+            echo "Pages API did not accept deploy-from-branch. Falling back to Actions deploy."
+          fi
+
+          echo "branch_source=${branch_source}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: configure
+    if: needs.configure.outputs.branch_source != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: .
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
